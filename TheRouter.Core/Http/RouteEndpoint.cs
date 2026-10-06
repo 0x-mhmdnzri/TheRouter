@@ -4,7 +4,7 @@ namespace TheRouter.Core.Http;
 /// Lightweight endpoint descriptor. Kept as a class because it is created
 /// only at startup and then becomes immutable.
 /// </summary>
-public sealed class Endpoint
+public sealed class RouteEndpoint
 {
     public required string Template { get; init; }
     public required string Method { get; init; }

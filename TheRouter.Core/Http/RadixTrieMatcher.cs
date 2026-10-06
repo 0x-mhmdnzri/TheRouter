@@ -6,13 +6,14 @@ namespace TheRouter.Core.Http;
 /// Immutable, allocation-conscious HTTP path matcher built as a segment trie.
 /// Matching works exclusively with ReadOnlySpan&lt;char&gt; and never allocates
 /// on the success/failure hot path when the HTTP method is one of the well-known values.
+/// Parameter values are returned as absolute (start, length) ranges into the original path.
 /// </summary>
 public sealed class RadixTrieMatcher
 {
     private readonly RouteNode _root = new();
     private bool _frozen;
 
-    public void Map(string method, string template, Endpoint endpoint)
+    public void Map(string method, string template, RouteEndpoint endpoint)
     {
         if (_frozen)
             throw new InvalidOperationException("Matcher is frozen; cannot add more routes.");
@@ -63,8 +64,8 @@ public sealed class RadixTrieMatcher
             }
         }
 
-        node.Endpoints ??= new Dictionary<string, Endpoint>(StringComparer.OrdinalIgnoreCase);
-        node.Endpoints[method] = endpoint;
+        node.RouteEndpoints ??= new Dictionary<string, RouteEndpoint>(StringComparer.OrdinalIgnoreCase);
+        node.RouteEndpoints[method] = endpoint;
     }
 
     public void Freeze()
@@ -90,13 +91,13 @@ public sealed class RadixTrieMatcher
     }
 
     /// <summary>
-    /// Zero-allocation match for the common case (known HTTP methods).
+    /// Zero-allocation match. Parameter ranges are absolute offsets into <paramref name="path"/>.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryMatch(
         ReadOnlySpan<char> method,
         ReadOnlySpan<char> path,
-        out Endpoint? endpoint,
+        out RouteEndpoint? endpoint,
         Span<(int Start, int Length)> paramRanges,
         out int paramCount)
     {
@@ -106,36 +107,67 @@ public sealed class RadixTrieMatcher
         if (!_frozen)
             throw new InvalidOperationException("Call Freeze() before matching.");
 
+        // Keep original for absolute offsets
+        ReadOnlySpan<char> original = path;
+        int baseOffset = 0;
+
+        // Manual trim so we can track offset
+        if (path.Length > 0 && path[0] == '/')
+        {
+            path = path[1..];
+            baseOffset = 1;
+        }
+        if (path.Length > 0 && path[^1] == '/')
+            path = path[..^1];
+
         var node = _root;
-        path = TrimSlashes(path);
+        int consumed = 0; // relative to the trimmed path
 
         while (!path.IsEmpty)
         {
             int slash = path.IndexOf('/');
             var segment = slash < 0 ? path : path[..slash];
+            int segmentStartInOriginal = baseOffset + consumed;
+            int segmentLen = segment.Length;
+
             var remaining = slash < 0 ? default : path[(slash + 1)..];
+            int advance = slash < 0 ? path.Length : slash + 1;
 
             if (node.StaticChildren.Count > 0 &&
                 node.StaticLookup.TryGetValue(segment, out var staticChild))
             {
                 node = staticChild;
                 path = remaining;
+                consumed += advance;
                 continue;
             }
 
             if (node.ParameterChild is { } paramNode)
             {
                 if (paramCount < paramRanges.Length)
-                    paramRanges[paramCount++] = (0, segment.Length); // relative length; absolute offset can be added later
+                    paramRanges[paramCount++] = (segmentStartInOriginal, segmentLen);
+
                 node = paramNode;
                 path = remaining;
+                consumed += advance;
                 continue;
             }
 
             if (node.CatchAllChild is { } catchNode)
             {
+                // rest of the path (already trimmed of leading slash logic)
+                int catchStart = baseOffset + consumed;
+                int catchLen = original.Length - catchStart;
+                // strip trailing slash if we trimmed it earlier
+                if (catchLen > 0 && original[catchStart + catchLen - 1] == '/' && 
+                    (baseOffset + consumed + path.Length < original.Length))
+                {
+                    // already handled by earlier trim
+                }
+
                 if (paramCount < paramRanges.Length)
-                    paramRanges[paramCount++] = (0, path.Length);
+                    paramRanges[paramCount++] = (catchStart, Math.Max(0, original.Length - catchStart));
+
                 node = catchNode;
                 break;
             }
@@ -143,31 +175,25 @@ public sealed class RadixTrieMatcher
             return false;
         }
 
-        if (node.Endpoints is null)
+        if (node.RouteEndpoints is null)
             return false;
 
-        // Zero-alloc method lookup for the 7 common verbs
-        return TryGetEndpoint(node.Endpoints, method, out endpoint);
+        return TryGetRouteEndpoint(node.RouteEndpoints, method, out endpoint);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryMatch(ReadOnlySpan<char> method, ReadOnlySpan<char> path, out Endpoint? endpoint)
+    public bool TryMatch(ReadOnlySpan<char> method, ReadOnlySpan<char> path, out RouteEndpoint? endpoint)
     {
         Span<(int, int)> dummy = stackalloc (int, int)[8];
         return TryMatch(method, path, out endpoint, dummy, out _);
     }
 
-    /// <summary>
-    /// Avoids method.ToString() for the well-known HTTP methods.
-    /// Falls back to ToString only for exotic methods (rare).
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool TryGetEndpoint(
-        Dictionary<string, Endpoint> map,
+    private static bool TryGetRouteEndpoint(
+        Dictionary<string, RouteEndpoint> map,
         ReadOnlySpan<char> method,
-        out Endpoint? endpoint)
+        out RouteEndpoint? endpoint)
     {
-        // Fast path for the methods that appear in 99.9 % of traffic
         if (method.Equals("GET", StringComparison.OrdinalIgnoreCase))
             return map.TryGetValue("GET", out endpoint);
         if (method.Equals("POST", StringComparison.OrdinalIgnoreCase))
@@ -183,17 +209,6 @@ public sealed class RadixTrieMatcher
         if (method.Equals("OPTIONS", StringComparison.OrdinalIgnoreCase))
             return map.TryGetValue("OPTIONS", out endpoint);
 
-        // Exotic method – one allocation is acceptable
         return map.TryGetValue(method.ToString(), out endpoint);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ReadOnlySpan<char> TrimSlashes(ReadOnlySpan<char> path)
-    {
-        if (path.Length > 0 && path[0] == '/')
-            path = path[1..];
-        if (path.Length > 0 && path[^1] == '/')
-            path = path[..^1];
-        return path;
     }
 }

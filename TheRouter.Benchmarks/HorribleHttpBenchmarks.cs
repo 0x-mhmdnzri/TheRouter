@@ -31,26 +31,26 @@ public class HorribleHttpBenchmarks
         string[] resources = ["users", "orders", "products", "invoices", "shipments", "payments", "reviews", "categories"];
         foreach (var r in resources)
         {
-            _matcher.Map("GET",  $"/api/v1/{r}", new Endpoint { Template = $"/api/v1/{r}", Method = "GET", HandlerId = 1 });
-            _matcher.Map("POST", $"/api/v1/{r}", new Endpoint { Template = $"/api/v1/{r}", Method = "POST", HandlerId = 2 });
-            _matcher.Map("GET",  $"/api/v1/{r}/{{id}}", new Endpoint { Template = $"/api/v1/{r}/{{id}}", Method = "GET", HandlerId = 3 });
-            _matcher.Map("PUT",  $"/api/v1/{r}/{{id}}", new Endpoint { Template = $"/api/v1/{r}/{{id}}", Method = "PUT", HandlerId = 4 });
-            _matcher.Map("DELETE", $"/api/v1/{r}/{{id}}", new Endpoint { Template = $"/api/v1/{r}/{{id}}", Method = "DELETE", HandlerId = 5 });
-            _matcher.Map("GET",  $"/api/v1/{r}/{{id}}/items", new Endpoint { Template = $"/api/v1/{r}/{{id}}/items", Method = "GET", HandlerId = 6 });
-            _matcher.Map("GET",  $"/api/v1/{r}/{{id}}/items/{{itemId}}", new Endpoint { Template = $"/api/v1/{r}/{{id}}/items/{{itemId}}", Method = "GET", HandlerId = 7 });
-            _matcher.Map("GET",  $"/api/v1/{r}/{{id}}/items/{{itemId}}/details", new Endpoint { Template = $"/api/v1/{r}/{{id}}/items/{{itemId}}/details", Method = "GET", HandlerId = 8 });
+            _matcher.Map("GET",  $"/api/v1/{r}", new RouteRouteEndpoint { Template = $"/api/v1/{r}", Method = "GET", HandlerId = 1 });
+            _matcher.Map("POST", $"/api/v1/{r}", new RouteRouteEndpoint { Template = $"/api/v1/{r}", Method = "POST", HandlerId = 2 });
+            _matcher.Map("GET",  $"/api/v1/{r}/{{id}}", new RouteRouteEndpoint { Template = $"/api/v1/{r}/{{id}}", Method = "GET", HandlerId = 3 });
+            _matcher.Map("PUT",  $"/api/v1/{r}/{{id}}", new RouteRouteEndpoint { Template = $"/api/v1/{r}/{{id}}", Method = "PUT", HandlerId = 4 });
+            _matcher.Map("DELETE", $"/api/v1/{r}/{{id}}", new RouteRouteEndpoint { Template = $"/api/v1/{r}/{{id}}", Method = "DELETE", HandlerId = 5 });
+            _matcher.Map("GET",  $"/api/v1/{r}/{{id}}/items", new RouteRouteEndpoint { Template = $"/api/v1/{r}/{{id}}/items", Method = "GET", HandlerId = 6 });
+            _matcher.Map("GET",  $"/api/v1/{r}/{{id}}/items/{{itemId}}", new RouteRouteEndpoint { Template = $"/api/v1/{r}/{{id}}/items/{{itemId}}", Method = "GET", HandlerId = 7 });
+            _matcher.Map("GET",  $"/api/v1/{r}/{{id}}/items/{{itemId}}/details", new RouteRouteEndpoint { Template = $"/api/v1/{r}/{{id}}/items/{{itemId}}/details", Method = "GET", HandlerId = 8 });
         }
 
         // ── 2. Deep nested admin paths ──────────────────────────────
         for (int i = 0; i < 50; i++)
         {
-            _matcher.Map("GET", $"/admin/level1/level2/level3/level4/resource{i}", new Endpoint
+            _matcher.Map("GET", $"/admin/level1/level2/level3/level4/resource{i}", new RouteEndpoint
             {
                 Template = $"/admin/level1/level2/level3/level4/resource{i}",
                 Method = "GET",
                 HandlerId = 100 + i
             });
-            _matcher.Map("GET", $"/admin/level1/level2/level3/level4/resource{i}/{{id}}/sub/{{subId}}", new Endpoint
+            _matcher.Map("GET", $"/admin/level1/level2/level3/level4/resource{i}/{{id}}/sub/{{subId}}", new RouteEndpoint
             {
                 Template = $"/admin/level1/level2/level3/level4/resource{i}/{{id}}/sub/{{subId}}",
                 Method = "GET",
@@ -59,13 +59,13 @@ public class HorribleHttpBenchmarks
         }
 
         // ── 3. Catch-all style ──────────────────────────────────────
-        _matcher.Map("GET", "/static/{*path}", new Endpoint { Template = "/static/{*path}", Method = "GET", HandlerId = 999 });
-        _matcher.Map("GET", "/files/{*path}", new Endpoint { Template = "/files/{*path}", Method = "GET", HandlerId = 998 });
+        _matcher.Map("GET", "/static/{*path}", new RouteRouteEndpoint { Template = "/static/{*path}", Method = "GET", HandlerId = 999 });
+        _matcher.Map("GET", "/files/{*path}", new RouteRouteEndpoint { Template = "/files/{*path}", Method = "GET", HandlerId = 998 });
 
         // ── 4. Many near-identical static routes (hash pressure) ────
         for (int i = 0; i < 200; i++)
         {
-            _matcher.Map("GET", $"/legacy/page-{i:D4}", new Endpoint
+            _matcher.Map("GET", $"/legacy/page-{i:D4}", new RouteEndpoint
             {
                 Template = $"/legacy/page-{i:D4}",
                 Method = "GET",

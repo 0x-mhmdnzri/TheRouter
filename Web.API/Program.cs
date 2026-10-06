@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
-using TheRouter.Core.Graph;
-using TheRouter.Core.Graph.Selectors;
+using TheRouter.Core.Http;
+using RouteEndpoint = TheRouter.Core.Http.RouteEndpoint;
 
 var builder = WebApplication.CreateSlimBuilder(args);
 
@@ -9,81 +9,87 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default);
 });
 
-builder.Services.AddOpenApi();
+// ── Build & freeze the matcher once at startup ──────────────────────
+var matcher = new RadixTrieMatcher();
 
-// ── Build a sample DAG once at startup (immutable afterwards) ───────
-var sampleGraph = new RouterGraphBuilder()
-    .WithStartNode(1)
-    .AddEdge(1, 2, weight: 10)
-    .AddEdge(1, 3, weight: 5, conditionId: 1)
-    .AddEdge(2, 4, weight: 1)
-    .AddEdge(3, 4, weight: 2)
-    .AddEdge(4, 5)
-    .Build();
+string[] resources = ["users", "orders", "products", "invoices", "shipments", "payments"];
+foreach (var r in resources)
+{
+    matcher.Map("GET",  $"/api/v1/{r}", new RouteEndpoint { Template = $"/api/v1/{r}", Method = "GET", HandlerId = 1 });
+    matcher.Map("POST", $"/api/v1/{r}", new RouteEndpoint { Template = $"/api/v1/{r}", Method = "POST", HandlerId = 2 });
+    matcher.Map("GET",  $"/api/v1/{r}/{{id}}", new RouteEndpoint { Template = $"/api/v1/{r}/{{id}}", Method = "GET", HandlerId = 3 });
+    matcher.Map("GET",  $"/api/v1/{r}/{{id}}/items/{{itemId}}", new RouteEndpoint { Template = $"/api/v1/{r}/{{id}}/items/{{itemId}}", Method = "GET", HandlerId = 4 });
+}
+matcher.Map("GET", "/health", new RouteEndpoint { Template = "/health", Method = "GET", HandlerId = 0 });
+matcher.Freeze();
 
-builder.Services.AddSingleton(sampleGraph);
+builder.Services.AddSingleton(matcher);
+
+// Shared handler for future proxy work
+builder.Services.AddSingleton(_ => new SocketsHttpHandler
+{
+    PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+    MaxConnectionsPerServer = 100,
+    EnableMultipleHttp2Connections = true
+});
+builder.Services.AddSingleton(sp => new HttpMessageInvoker(sp.GetRequiredService<SocketsHttpHandler>(), disposeHandler: false));
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
+// ── Ultra-thin matching endpoint (no middleware pipeline beyond this) ─
+app.MapMethods("{**path}", ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"], async (
+    HttpContext ctx,
+    RadixTrieMatcher matcher) =>
 {
-    app.MapOpenApi();
-}
+    var method = ctx.Request.Method.AsSpan();
+    var path = ctx.Request.Path.Value.AsSpan();
 
-var routeApi = app.MapGroup("/route");
+    Span<(int Start, int Length)> ranges = stackalloc (int, int)[8];
 
-// GET /route?strategy=first|lowest|highest
-routeApi.MapGet("/", (
-    RouterGraph graph,
-    string? strategy) =>
-{
-    EdgeSelector selector = strategy?.ToLowerInvariant() switch
+    if (!matcher.TryMatch(method, path, out var endpoint, ranges, out int paramCount))
     {
-        "lowest"  => BuiltInSelectors.LowestWeight,
-        "highest" => BuiltInSelectors.HighestWeight,
-        _         => BuiltInSelectors.First
-    };
-
-    Span<int> pathBuffer = stackalloc int[32];
-    if (!graph.TryRoute(pathBuffer, out int len, selector))
-        return Results.NotFound(new { error = "No path found" });
-
-    var nodeIds = new int[len];
-    for (int i = 0; i < len; i++)
-        nodeIds[i] = graph.GetNode(pathBuffer[i]).Id;
-
-    return Results.Ok(new RouteResponse(nodeIds, strategy ?? "first"));
-})
-.WithName("GetRoute");
-
-// POST /route/all  – fan-out
-routeApi.MapPost("/all", (RouterGraph graph) =>
-{
-    Span<int> flat = stackalloc int[128];
-    if (!graph.TryRouteAll(flat, out int written, out int pathCount))
-        return Results.BadRequest(new { error = "Buffer too small or no paths" });
-
-    var paths = new List<int[]>(pathCount);
-    int cursor = 0;
-    for (int p = 0; p < pathCount; p++)
-    {
-        int plen = flat[cursor++];
-        var ids = new int[plen];
-        for (int i = 0; i < plen; i++)
-            ids[i] = graph.GetNode(flat[cursor++]).Id;
-        paths.Add(ids);
+        ctx.Response.StatusCode = 404;
+        return;
     }
 
-    return Results.Ok(new FanOutResponse(paths));
-})
-.WithName("GetAllRoutes");
+    // Extremely light response – prove matching cost, not serialization cost
+    ctx.Response.StatusCode = 200;
+    ctx.Response.ContentType = "application/json";
+
+    // Manual tiny JSON to avoid JsonSerializer allocation on the hot path for this test
+    await ctx.Response.WriteAsync(
+        $"{{\"template\":\"{endpoint!.Template}\",\"handler\":{endpoint.HandlerId},\"params\":{paramCount}}}",
+        ctx.RequestAborted).ConfigureAwait(false);
+});
+
+// ── Minimal proxy example (forward to a fixed upstream for now) ─────
+// This is the starting point for the real forward layer.
+app.MapPost("/proxy/{**catchAll}", async (
+    HttpContext ctx,
+    HttpMessageInvoker invoker) =>
+{
+    // Very basic forward – body streamed, no buffering
+    var upstream = new Uri("http://127.0.0.1:9999/"); // placeholder
+    using var req = new HttpRequestMessage(HttpMethod.Post, upstream)
+    {
+        Content = new StreamContent(ctx.Request.Body)
+    };
+
+    foreach (var h in ctx.Request.Headers)
+    {
+        if (!req.Headers.TryAddWithoutValidation(h.Key, h.Value.ToArray()))
+            req.Content?.Headers.TryAddWithoutValidation(h.Key, h.Value.ToArray());
+    }
+
+    using var resp = await invoker.SendAsync(req, ctx.RequestAborted).ConfigureAwait(false);
+    ctx.Response.StatusCode = (int)resp.StatusCode;
+    foreach (var h in resp.Headers)
+        ctx.Response.Headers[h.Key] = h.Value.ToArray();
+    if (resp.Content is not null)
+        await resp.Content.CopyToAsync(ctx.Response.Body, ctx.RequestAborted).ConfigureAwait(false);
+});
 
 app.Run();
 
-public sealed record RouteResponse(int[] Path, string Strategy);
-public sealed record FanOutResponse(List<int[]> Paths);
-
-[JsonSerializable(typeof(RouteResponse))]
-[JsonSerializable(typeof(FanOutResponse))]
-[JsonSerializable(typeof(int[]))]
+[JsonSerializable(typeof(object))]
 internal partial class AppJsonSerializerContext : JsonSerializerContext;

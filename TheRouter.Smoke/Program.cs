@@ -1,79 +1,50 @@
 using System.Diagnostics;
 using TheRouter.Core.Graph;
 using TheRouter.Core.Graph.Selectors;
+using TheRouter.Core.Http;
 
-// ── Sample DAG ──────────────────────────────────────────────────────
+Console.WriteLine("=== Graph smoke ===");
 var graph = new RouterGraphBuilder()
     .WithStartNode(1)
     .AddEdge(1, 2, weight: 10)
-    .AddEdge(1, 3, weight: 5, conditionId: 1)
+    .AddEdge(1, 3, weight: 5)
     .AddEdge(2, 4, weight: 1)
     .AddEdge(3, 4, weight: 2)
     .AddEdge(4, 5)
     .Build();
 
-Console.WriteLine($"Graph: {graph.NodeCount} nodes, {graph.EdgeCount} edges\n");
-
 Span<int> path = stackalloc int[16];
+graph.TryRoute(path, out int len, BuiltInSelectors.LowestWeight);
+Console.Write("LowestWeight path: ");
+for (int i = 0; i < len; i++) Console.Write(graph.GetNode(path[i]).Id + (i < len-1 ? " → " : "\n"));
 
-// Selectors
-graph.TryRoute(path, out int len, BuiltInSelectors.First);
-PrintPath("First", graph, path, len);
-
-graph.TryRoute(path, out len, BuiltInSelectors.LowestWeight);
-PrintPath("LowestWeight", graph, path, len);
-
-// Dijkstra
-Span<int> dist = stackalloc int[graph.NodeCount];
-Span<int> prev = stackalloc int[graph.NodeCount];
-Span<int> heap = stackalloc int[graph.NodeCount];
-
-if (ShortestPath.TryDijkstra(graph, graph.StartNodeIndex, /*target*/ 4, dist, prev, heap, path, out len, out int cost))
-    PrintPath($"Dijkstra → node 4 (cost={cost})", graph, path, len);
-
-if (ShortestPath.TryShortestPathToAnySink(graph, dist, prev, heap, path, out len, out cost))
-    PrintPath($"Dijkstra → any sink (cost={cost})", graph, path, len);
-
-// Fan-out
-Span<int> flat = stackalloc int[64];
-graph.TryRouteAll(flat, out _, out int pathCount);
-Console.WriteLine($"\nFan-out paths: {pathCount}");
-
-// Hot-swappable
-var store = new HotSwappableGraph(graph);
-Console.WriteLine($"\nHotSwappable current nodes: {store.Current.NodeCount}");
-
-store.Update(b =>
+Console.WriteLine("\n=== HTTP Radix matcher (absolute ranges) ===");
+var matcher = new RadixTrieMatcher();
+matcher.Map("GET", "/api/v1/users/{id}/items/{itemId}", new RouteEndpoint
 {
-    b.WithStartNode(10)
-     .AddEdge(10, 20, weight: 1)
-     .AddEdge(20, 30);
+    Template = "/api/v1/users/{id}/items/{itemId}",
+    Method = "GET",
+    HandlerId = 42
 });
-Console.WriteLine($"After Update nodes: {store.Current.NodeCount}");
+matcher.Freeze();
 
-// Performance
-Console.WriteLine("\n── Performance (LowestWeight) ──");
-for (int i = 0; i < 2000; i++)
-    graph.TryRoute(path, out _, BuiltInSelectors.LowestWeight);
+var testPath = "/api/v1/users/99/items/7";
+Span<(int Start, int Length)> ranges = stackalloc (int, int)[4];
+if (matcher.TryMatch("GET", testPath, out var ep, ranges, out int pc))
+{
+    Console.WriteLine($"Matched: {ep!.Template} (handler {ep.HandlerId})");
+    for (int i = 0; i < pc; i++)
+    {
+        var (start, length) = ranges[i];
+        var value = testPath.AsSpan(start, length);
+        Console.WriteLine($"  param[{i}] = '{value}'  (start={start}, len={length})");
+    }
+}
 
+// Allocation probe
 long before = GC.GetAllocatedBytesForCurrentThread();
 const int N = 100_000;
-var sw = Stopwatch.StartNew();
 for (int i = 0; i < N; i++)
-    graph.TryRoute(path, out _, BuiltInSelectors.LowestWeight);
-sw.Stop();
+    matcher.TryMatch("GET", testPath, out _, ranges, out _);
 long alloc = GC.GetAllocatedBytesForCurrentThread() - before;
-
-Console.WriteLine($"Throughput : {N / sw.Elapsed.TotalSeconds:N0} routes/sec");
-Console.WriteLine($"Allocated  : {alloc:N0} bytes  ({(double)alloc / N:F2} / route)");
-
-static void PrintPath(string label, RouterGraph g, Span<int> path, int len)
-{
-    Console.Write($"{label,-35}: ");
-    for (int i = 0; i < len; i++)
-    {
-        Console.Write(g.GetNode(path[i]).Id);
-        if (i < len - 1) Console.Write(" → ");
-    }
-    Console.WriteLine();
-}
+Console.WriteLine($"\n{N:N0} matches → allocated {alloc:N0} bytes ({(double)alloc/N:F2} B/op)");
