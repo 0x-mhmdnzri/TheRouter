@@ -6,22 +6,24 @@ Designed for extreme throughput with near-zero GC pressure on the hot path.
 
 ## Design goals
 
-- **> 12 000 RPS** (easily exceeded – measured **> 6 M routes/sec**)
+- **> 12 000 RPS** (measured **> 4–8 M routes/sec** on modest hardware)
 - Near-zero allocation on the matching / traversal path
-- Cache-friendly contiguous memory layout (CSR – Compressed Sparse Row)
+- Cache-friendly contiguous memory layout (CSR)
 - Immutable graph after construction → completely lock-free reads
-- AOT / NativeAOT friendly
+- AOT-friendly core
 
 ## Features
 
 | Feature | Status |
 |---------|--------|
 | Single-path routing (`TryRoute`) | ✅ |
-| Weighted edge selection (Lowest / Highest) | ✅ |
-| Conditional edges (`ConditionId` + mask) | ✅ |
-| Fan-out – collect all paths (`TryRouteAll`) | ✅ |
-| Minimal API sample endpoints | ✅ |
-| Zero-allocation hot path | ✅ |
+| Weighted selection (Lowest / Highest) | ✅ |
+| Conditional edges | ✅ |
+| Fan-out (`TryRouteAll`) | ✅ |
+| Dijkstra shortest-path (zero-alloc buffers) | ✅ |
+| Hot-swappable graph (double-buffering) | ✅ |
+| BenchmarkDotNet suite | ✅ |
+| Minimal API sample | ✅ |
 
 ## Quick smoke test
 
@@ -29,56 +31,54 @@ Designed for extreme throughput with near-zero GC pressure on the hot path.
 dotnet run --project TheRouter.Smoke -c Release
 ```
 
-Typical result:
+## Benchmarks
 
-```
-Throughput      : ~6 400 000 routes/sec
-Allocated bytes : ~0
+```bash
+dotnet run --project TheRouter.Benchmarks -c Release
 ```
 
-## Usage
+Includes MemoryDiagnoser for:
+
+- `TryRoute` (First / LowestWeight)
+- Fan-out
+- Dijkstra
+
+## Core usage
 
 ```csharp
 var graph = new RouterGraphBuilder()
     .WithStartNode(1)
     .AddEdge(1, 2, weight: 10)
-    .AddEdge(1, 3, weight: 5, conditionId: 1)
+    .AddEdge(1, 3, weight: 5)
     .AddEdge(2, 4)
     .AddEdge(3, 4)
     .Build();
 
+// Single path
 Span<int> path = stackalloc int[32];
-
-// Lowest weight
 graph.TryRoute(path, out int len, BuiltInSelectors.LowestWeight);
 
-// Conditional
-var conditions = new bool[4];
-conditions[1] = true;
-var sel = new ConditionalSelector(conditions);
-graph.TryRoute(path, out len, sel.SelectLowestWeight);
+// Dijkstra (caller supplies working buffers → zero alloc)
+Span<int> dist = stackalloc int[graph.NodeCount];
+Span<int> prev = stackalloc int[graph.NodeCount];
+Span<int> heap = stackalloc int[graph.NodeCount];
+ShortestPath.TryDijkstra(graph, start, target, dist, prev, heap, path, out len, out int cost);
 
-// Fan-out (all paths)
-Span<int> flat = stackalloc int[128];
-graph.TryRouteAll(flat, out int written, out int pathCount);
+// Hot-swappable (lock-free readers)
+var store = new HotSwappableGraph(graph);
+store.Update(b => b.WithStartNode(10).AddEdge(10, 20));
+var current = store.Current; // always an immutable snapshot
 ```
 
-## HTTP endpoints (Web.API)
+## Project layout
 
-```
-GET  /route?strategy=first|lowest|highest
-POST /route/all
-```
+- `TheRouter.Core` – engine (CSR, selectors, Dijkstra, HotSwappable)
+- `TheRouter.Smoke` – quick functional + allocation check
+- `TheRouter.Benchmarks` – formal BenchmarkDotNet suite
+- `Web.API` – Minimal API host
 
-## Project structure
+## Next possible directions
 
-- `TheRouter.Core` – allocation-free graph engine + selectors
-- `TheRouter.Smoke` – micro-benchmark
-- `Web.API` – Minimal API host with sample graph
-
-## Next possible steps
-
-- [ ] Dijkstra / shortest-path over the whole DAG
-- [ ] Dynamic graph updates via double-buffering
-- [ ] Proper BenchmarkDotNet suite
-- [ ] Integration tests with WebApplicationFactory
+- Full topological DP shortest-path specialized for pure DAGs
+- Parallel fan-out with bounded Channels
+- Persistent graph snapshots / versioning

@@ -12,6 +12,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TheRouter.Core", "TheRouter
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TheRouter.Smoke", "TheRouter.Smoke\TheRouter.Smoke.csproj", "{80FC32A9-311D-4827-8A24-6F9ED0069253}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TheRouter.Benchmarks", "TheRouter.Benchmarks\TheRouter.Benchmarks.csproj", "{74931187-E4F2-43A0-84CF-3E0BCB980B9E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -58,6 +60,18 @@ Global
 		{80FC32A9-311D-4827-8A24-6F9ED0069253}.Release|x64.Build.0 = Release|Any CPU
 		{80FC32A9-311D-4827-8A24-6F9ED0069253}.Release|x86.ActiveCfg = Release|Any CPU
 		{80FC32A9-311D-4827-8A24-6F9ED0069253}.Release|x86.Build.0 = Release|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Debug|x64.Build.0 = Debug|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Debug|x86.Build.0 = Debug|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Release|x64.ActiveCfg = Release|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Release|x64.Build.0 = Release|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Release|x86.ActiveCfg = Release|Any CPU
+		{74931187-E4F2-43A0-84CF-3E0BCB980B9E}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
