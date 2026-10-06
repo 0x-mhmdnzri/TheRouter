@@ -24,29 +24,38 @@ dotnet run --project Web.API -c Release --launch-profile http
 oha -c 500 -z 60s --latency-correction --no-tui http://localhost:5014/route-info
 ```
 
-### Measured (Windows, 500 concurrent, 60s)
+### Measured — warm-up 5s (Windows, `-c 500`)
 
 ```
+oha -c 500 -z 5s --no-tui http://localhost:5014/route-info
+
 Success rate: 100.00%
-Total:        60.0 s
-Requests/sec: 55 825
-Average:      8.95 ms
-Fastest:      0.065 ms
-Slowest:      887 ms
+Requests/sec: 102 064
+Average:      4.9 ms
+Fastest:      0.1 ms
+Slowest:      1.37 s
+Size/request: 58 B
 
 Percentiles:
-  p10  2.08 ms
-  p25  3.36 ms
-  p50  5.45 ms
-  p75  14.87 ms
-  p90  19.66 ms
-  p95  22.46 ms
-  p99  30.81 ms
-  p99.9 43.23 ms
-  p99.99 173 ms
+  p10  0.6 ms
+  p25  1.0 ms
+  p50  1.9 ms
+  p75  5.9 ms
+  p90  7.0 ms
+  p95  8.8 ms
+  p99  39.4 ms
+  p99.9 267 ms
+  p99.99 1.11 s
 
-Total responses: 3 350 562 × 200
-Size/request:    167 B  (older build; current compact payload is ~80 B)
+Responses: 513 090 × 200
+```
+
+### Measured — sustained 60s (earlier run, pre–ThreadPool bump)
+
+```
+Requests/sec: 55 825
+Average:      8.95 ms
+p50 5.45 ms | p99 30.8 ms
 ```
 
 Progression:
@@ -54,9 +63,12 @@ Progression:
 | Stage | RPS | Average | Notes |
 |-------|-----|---------|--------|
 | Before Kestrel/logging opts | ~16.7k | ~30 ms | List + JsonSerializer on hot path |
-| After slim + static bytes | **~55.8k** | **~9 ms** | Live `TryMatch` + precomputed body |
+| After slim + static bytes | ~55.8k | ~9 ms | Live `TryMatch` + precomputed body |
+| After ThreadPool + compact JSON | **~102k** | **~4.9 ms** | 5s warm-up run, 58 B/response |
 
 In-process matcher alone (no HTTP): **~400k+ matches/sec**, ~0 B/op.
+
+Remaining tail (p99.9+) is mostly connection setup / scheduling under `-c 500`, not match cost (see DNS+dialup ~300 ms in details).
 
 ## How to push further
 
