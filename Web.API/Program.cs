@@ -20,17 +20,16 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MinRequestBodyDataRate = null;
     options.Limits.MinResponseDataRate = null;
     options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(5);
-    options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
-    options.Limits.Http2.MaxStreamsPerConnection = 1024;
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
     options.ConfigureEndpointDefaults(lo =>
     {
-        // HTTP/1.1 is often lower latency for tiny responses under high concurrency
-        lo.Protocols = HttpProtocols.Http1;
+        // HTTP/2 multiplexing helps under -c 500; pure HTTP/1 regressed RPS badly
+        lo.Protocols = HttpProtocols.Http1AndHttp2;
     });
 });
 
 builder.Logging.ClearProviders();
-builder.Logging.SetMinimumLevel(LogLevel.Error);
+builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
 builder.Services.ConfigureHttpJsonOptions(o =>
 {
@@ -39,7 +38,6 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 
 builder.Services.AddOpenApi();
 
-// ── Matcher (immutable after Freeze) ────────────────────────────────
 var matcher = new RadixTrieMatcher();
 string[] resources = ["users", "orders", "products", "invoices", "shipments", "payments"];
 foreach (var r in resources)
@@ -85,63 +83,10 @@ builder.Services.AddSingleton<ReverseProxy>();
 
 var app = builder.Build();
 
-// Precomputed responses
-ReadOnlyMemory<byte> healthMem = Encoding.UTF8.GetBytes("""{"status":"ok"}""");
-ReadOnlyMemory<byte> okMem = Encoding.UTF8.GetBytes("""{"ok":true}""");
-ReadOnlyMemory<byte> routeInfoMem = Encoding.UTF8.GetBytes("""{"t":"/api/v1/users/{id}/items/{itemId}","h":4,"p":[42,7]}""");
-ReadOnlyMemory<byte> notFoundMem = Encoding.UTF8.GetBytes("""{"error":"not found"}""");
-
-// ═══════════════════════════════════════════════════════════════════
-// FAST PATH — middleware before endpoint routing / DI
-// Handles /route-info, /health, /bench/* with zero DI resolution.
-// ═══════════════════════════════════════════════════════════════════
-app.Use(async (ctx, next) =>
-{
-    var path = ctx.Request.Path.Value; // already interned/cached per request by Kestrel
-    if (path is null)
-    {
-        await next();
-        return;
-    }
-
-    // /health
-    if (path.Length == 7 && path.equals_health())
-    {
-        await WriteFastAsync(ctx, 200, healthMem);
-        return;
-    }
-
-    // /route-info  (live match + fixed body)
-    if (path.Length == 11 && path.equals_route_info())
-    {
-        Span<(int Start, int Length)> ranges = stackalloc (int, int)[8];
-        // Constant sample path as ReadOnlySpan — no string alloc
-        if (!matcher.TryMatch("GET", "/api/v1/users/42/items/7", out var ep, ranges, out _) || ep is null)
-        {
-            await WriteFastAsync(ctx, 404, notFoundMem);
-            return;
-        }
-        await WriteFastAsync(ctx, 200, routeInfoMem);
-        return;
-    }
-
-    // /bench/...
-    if (path.StartsWith("/bench", StringComparison.Ordinal))
-    {
-        var inner = path.Length > 6 ? path.AsSpan(6) : "/".AsSpan();
-        if (inner.Length == 0) inner = "/";
-        Span<(int, int)> ranges = stackalloc (int, int)[8];
-        if (!matcher.TryMatch("GET", inner, out var ep, ranges, out _) || ep is null)
-        {
-            await WriteFastAsync(ctx, 404, notFoundMem);
-            return;
-        }
-        await WriteFastAsync(ctx, 200, okMem);
-        return;
-    }
-
-    await next();
-});
+// Precomputed bodies (captured — no DI, no serializer on hot path)
+var healthMem = new ReadOnlyMemory<byte>(Encoding.UTF8.GetBytes("""{"status":"ok"}"""));
+var okMem = new ReadOnlyMemory<byte>(Encoding.UTF8.GetBytes("""{"ok":true}"""));
+var routeInfoMem = new ReadOnlyMemory<byte>(Encoding.UTF8.GetBytes("""{"t":"/api/v1/users/{id}/items/{itemId}","h":4,"p":[42,7]}"""));
 
 app.MapOpenApi();
 app.MapGet("/swagger", () => Results.Content("""
@@ -154,21 +99,53 @@ app.MapGet("/swagger", () => Results.Content("""
 </body></html>
 """, "text/html")).ExcludeFromDescription();
 
-// Keep named endpoints for OpenAPI discovery (less hot path)
-app.MapGet("/health", () => Results.Ok(new HealthResponse("ok", DateTimeOffset.UtcNow)))
-    .WithName("Health").WithTags("System").ExcludeFromDescription();
+// ── Hot paths: matcher from closure (not request DI) ────────────────
+app.MapGet("/health", async ctx =>
+{
+    ctx.Response.ContentType = "application/json";
+    ctx.Response.ContentLength = healthMem.Length;
+    await ctx.Response.Body.WriteAsync(healthMem);
+}).WithName("Health").WithTags("System");
 
-app.MapGet("/route-info", () => Results.Bytes(routeInfoMem.ToArray(), "application/json"))
-    .WithName("RouteInfo").WithTags("Matcher");
+app.MapGet("/route-info", async ctx =>
+{
+    Span<(int Start, int Length)> ranges = stackalloc (int, int)[8];
+    if (!matcher.TryMatch("GET", "/api/v1/users/42/items/7", out var ep, ranges, out _) || ep is null)
+    {
+        ctx.Response.StatusCode = 404;
+        return;
+    }
+    ctx.Response.ContentType = "application/json";
+    ctx.Response.ContentLength = routeInfoMem.Length;
+    await ctx.Response.Body.WriteAsync(routeInfoMem);
+}).WithName("RouteInfo").WithTags("Matcher");
+
+app.MapGet("/bench/{**path}", async ctx =>
+{
+    var full = ctx.Request.Path.Value ?? "/";
+    var inner = full.StartsWith("/bench", StringComparison.OrdinalIgnoreCase)
+        ? full.AsSpan(6) : full.AsSpan();
+    if (inner.Length == 0) inner = "/";
+
+    Span<(int, int)> ranges = stackalloc (int, int)[8];
+    if (!matcher.TryMatch("GET", inner, out var ep, ranges, out _) || ep is null)
+    {
+        ctx.Response.StatusCode = 404;
+        return;
+    }
+    ctx.Response.ContentType = "application/json";
+    ctx.Response.ContentLength = okMem.Length;
+    await ctx.Response.Body.WriteAsync(okMem);
+}).WithName("BenchMatch").WithTags("LoadTest");
 
 app.MapMethods("/api/{**catchAll}",
     ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-    async (HttpContext ctx, RadixTrieMatcher m, ReverseProxy proxy) =>
+    async (HttpContext ctx, ReverseProxy proxy) =>
 {
     var method = ctx.Request.Method.AsSpan();
     var path = ctx.Request.Path.Value.AsSpan();
     Span<(int Start, int Length)> ranges = stackalloc (int, int)[8];
-    if (!m.TryMatch(method, path, out var endpoint, ranges, out int paramCount))
+    if (!matcher.TryMatch(method, path, out var endpoint, ranges, out int paramCount))
     {
         ctx.Response.StatusCode = 404;
         await ctx.Response.WriteAsJsonAsync(new ErrorResponse("No matching route"), AppJsonSerializerContext.Default.ErrorResponse);
@@ -188,7 +165,7 @@ app.MapMethods("/api/{**catchAll}",
         AppJsonSerializerContext.Default.LocalRouteResponse);
 }).WithName("ApiRouter").WithTags("Router");
 
-app.MapPost("/load-test", async (LoadTestRequest req, RadixTrieMatcher m) =>
+app.MapPost("/load-test", async (LoadTestRequest req) =>
 {
     int total = req.TotalRequests <= 0 ? 60_000 : req.TotalRequests;
     int concurrency = req.Concurrency <= 0 ? 64 : req.Concurrency;
@@ -203,7 +180,7 @@ app.MapPost("/load-test", async (LoadTestRequest req, RadixTrieMatcher m) =>
                      : i % 3 == 1 ? "/api/v1/orders" : "/api/v1/products/15";
             var t0 = Stopwatch.GetTimestamp();
             Span<(int, int)> ranges = stackalloc (int, int)[8];
-            if (m.TryMatch("GET", path, out _, ranges, out _)) Interlocked.Increment(ref success);
+            if (matcher.TryMatch("GET", path, out _, ranges, out _)) Interlocked.Increment(ref success);
             latencies.Add(Stopwatch.GetTimestamp() - t0);
             return ValueTask.CompletedTask;
         });
@@ -216,29 +193,6 @@ app.MapPost("/load-test", async (LoadTestRequest req, RadixTrieMatcher m) =>
 
 app.Run();
 
-// ── Helpers ─────────────────────────────────────────────────────────
-static ValueTask<System.IO.Pipelines.FlushResult> WriteFastAsync(HttpContext ctx, int status, ReadOnlyMemory<byte> body)
-{
-    var res = ctx.Response;
-    res.StatusCode = status;
-    res.ContentType = "application/json";
-    res.ContentLength = body.Length;
-    // BodyWriter avoids some Stream overhead vs Body.WriteAsync
-    return res.BodyWriter.WriteAsync(body, ctx.RequestAborted);
-}
-
-internal static class PathFastEquals
-{
-    // Avoid culture-aware compare; JIT can inline these
-    public static bool equals_health(this string path)
-        => path[1] == 'h' && path[2] == 'e' && path[3] == 'a' && path[4] == 'l' && path[5] == 't' && path[6] == 'h';
-
-    public static bool equals_route_info(this string path)
-        => path[1] == 'r' && path[2] == 'o' && path[3] == 'u' && path[4] == 't' && path[5] == 'e'
-        && path[6] == '-' && path[7] == 'i' && path[8] == 'n' && path[9] == 'f' && path[10] == 'o';
-}
-
-public sealed record HealthResponse(string Status, DateTimeOffset At);
 public sealed record ErrorResponse(string Error);
 public sealed record LocalRouteResponse(string Template, int HandlerId, List<string> Params);
 public sealed record LoadTestRequest(int TotalRequests = 60_000, int Concurrency = 64);
@@ -246,7 +200,6 @@ public sealed record LoadTestResult(
     long Total, long Success, double ElapsedSec, double Rps,
     double P50Ms, double P99Ms, double P999Ms, double MaxMs);
 
-[JsonSerializable(typeof(HealthResponse))]
 [JsonSerializable(typeof(ErrorResponse))]
 [JsonSerializable(typeof(LocalRouteResponse))]
 [JsonSerializable(typeof(LoadTestRequest))]
