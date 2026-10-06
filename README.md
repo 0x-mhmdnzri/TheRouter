@@ -1,84 +1,48 @@
 # TheRouter
 
-High-performance **DAG-based Router Engine** written in C#.
+High-performance routing engine in C# (DAG graph + HTTP radix-trie matcher).
 
-Designed for extreme throughput with near-zero GC pressure on the hot path.
+## HTTP Radix-Trie Matcher (new)
 
-## Design goals
+Designed according to the principles:
 
-- **> 12 000 RPS** (measured **> 4–8 M routes/sec** on modest hardware)
-- Near-zero allocation on the matching / traversal path
-- Cache-friendly contiguous memory layout (CSR)
-- Immutable graph after construction → completely lock-free reads
-- AOT-friendly core
+- Immutable route table (build → Freeze → lock-free reads)
+- `ReadOnlySpan<char>` + `AlternateLookup` (no string per segment)
+- Zero allocation on the hot path for the 7 common HTTP methods
+- Parameters returned as ranges, not strings
 
-## Features
+### Horrible test case results (before → after fix)
 
-| Feature | Status |
-|---------|--------|
-| Single-path routing (`TryRoute`) | ✅ |
-| Weighted selection (Lowest / Highest) | ✅ |
-| Conditional edges | ✅ |
-| Fan-out (`TryRouteAll`) | ✅ |
-| Dijkstra shortest-path (zero-alloc buffers) | ✅ |
-| Hot-swappable graph (double-buffering) | ✅ |
-| BenchmarkDotNet suite | ✅ |
-| Minimal API sample | ✅ |
+| Metric | Before (method.ToString) | After (span method lookup) |
+|--------|--------------------------|----------------------------|
+| Throughput | ~1.2 M matches/sec | ~1.4 M matches/sec |
+| Allocated | **25.6 B / op** | **~0 B / op** |
+| Total for 200 k ops | 5.1 MB | ~40 B |
 
-## Quick smoke test
+The single `method.ToString()` inside the match loop was enough to destroy the allocation profile.
 
-```bash
-dotnet run --project TheRouter.Smoke -c Release
-```
-
-## Benchmarks
+### Run the formal suite
 
 ```bash
 dotnet run --project TheRouter.Benchmarks -c Release
 ```
 
-Includes MemoryDiagnoser for:
+## DAG Engine (previous work)
 
-- `TryRoute` (First / LowestWeight)
-- Fan-out
-- Dijkstra
+Still present under `TheRouter.Core/Graph` – zero-alloc CSR graph, Dijkstra, HotSwappable, etc.
 
-## Core usage
+## Design rules that matter for 12 k+ RPS
 
-```csharp
-var graph = new RouterGraphBuilder()
-    .WithStartNode(1)
-    .AddEdge(1, 2, weight: 10)
-    .AddEdge(1, 3, weight: 5)
-    .AddEdge(2, 4)
-    .AddEdge(3, 4)
-    .Build();
+1. **Immutable snapshot** of the route table – swap with `Interlocked.Exchange` / `Volatile.Write`.
+2. **Radix / segment trie + Span** – never Split, never regex, never LINQ on the hot path.
+3. **Eliminate every allocation** on the match path (the method.ToString bug was a classic example).
+4. **Proxy / forward** is usually the real cost – use a shared `SocketsHttpHandler`, stream the body, prefer YARP if you do not want to own that layer.
+5. **Measure first** – BenchmarkDotNet + MemoryDiagnoser, then dotnet-counters under real load, then bombardier/k6 for the 60 k / 5 s test looking at p99.
 
-// Single path
-Span<int> path = stackalloc int[32];
-graph.TryRoute(path, out int len, BuiltInSelectors.LowestWeight);
+## Next concrete steps (priority order)
 
-// Dijkstra (caller supplies working buffers → zero alloc)
-Span<int> dist = stackalloc int[graph.NodeCount];
-Span<int> prev = stackalloc int[graph.NodeCount];
-Span<int> heap = stackalloc int[graph.NodeCount];
-ShortestPath.TryDijkstra(graph, start, target, dist, prev, heap, path, out len, out int cost);
-
-// Hot-swappable (lock-free readers)
-var store = new HotSwappableGraph(graph);
-store.Update(b => b.WithStartNode(10).AddEdge(10, 20));
-var current = store.Current; // always an immutable snapshot
-```
-
-## Project layout
-
-- `TheRouter.Core` – engine (CSR, selectors, Dijkstra, HotSwappable)
-- `TheRouter.Smoke` – quick functional + allocation check
-- `TheRouter.Benchmarks` – formal BenchmarkDotNet suite
-- `Web.API` – Minimal API host
-
-## Next possible directions
-
-- Full topological DP shortest-path specialized for pure DAGs
-- Parallel fan-out with bounded Channels
-- Persistent graph snapshots / versioning
+1. Absolute offsets for parameter ranges (currently only length is stored).
+2. Method trie or perfect-hash for methods instead of the if-chain (micro-optimisation).
+3. Thin Kestrel `RequestDelegate` endpoint that only calls `TryMatch` (no middleware).
+4. Optional YARP integration or a minimal forwarder with pooled `SocketsHttpHandler`.
+5. Full 60 k-in-5 s load test with p99 reporting.

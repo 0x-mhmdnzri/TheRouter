@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Running;
 using TheRouter.Benchmarks;
 
-BenchmarkRunner.Run<RouterBenchmarks>();
+// Run the horrible HTTP matcher suite (the interesting one)
+BenchmarkRunner.Run<HorribleHttpBenchmarks>();
