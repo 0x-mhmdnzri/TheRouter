@@ -6,21 +6,22 @@ Designed for extreme throughput with near-zero GC pressure on the hot path.
 
 ## Design goals
 
-- **> 12 000 RPS** (target: 60 k requests in 5 s) with headroom for much higher rates
+- **> 12 000 RPS** (easily exceeded – measured **> 6 M routes/sec**)
 - Near-zero allocation on the matching / traversal path
 - Cache-friendly contiguous memory layout (CSR – Compressed Sparse Row)
 - Immutable graph after construction → completely lock-free reads
 - AOT / NativeAOT friendly
 
-## Core ideas (from latency & high-load engineering)
+## Features
 
-| Technique | Why |
-|-----------|-----|
-| `readonly struct` Node / Edge | No object header, stays on stack or in contiguous arrays |
-| CSR layout (`_nodes` + `_edges`) | Sequential memory access, excellent CPU prefetch |
-| `FrozenDictionary` for Id → Index | Built once, then zero-overhead lookups |
-| `Span<int>` / `stackalloc` for path | No heap allocation for the result path |
-| Server GC + DATAS | Default on .NET 9/10; keeps pause times low under load |
+| Feature | Status |
+|---------|--------|
+| Single-path routing (`TryRoute`) | ✅ |
+| Weighted edge selection (Lowest / Highest) | ✅ |
+| Conditional edges (`ConditionId` + mask) | ✅ |
+| Fan-out – collect all paths (`TryRouteAll`) | ✅ |
+| Minimal API sample endpoints | ✅ |
+| Zero-allocation hot path | ✅ |
 
 ## Quick smoke test
 
@@ -28,42 +29,56 @@ Designed for extreme throughput with near-zero GC pressure on the hot path.
 dotnet run --project TheRouter.Smoke -c Release
 ```
 
-Typical result on a modest machine:
+Typical result:
 
 ```
-Iterations      : 50,000
-Elapsed         : ~6 ms
-Throughput      : ~8 000 000 routes/sec
-Allocated bytes : 0
-Bytes / route   : 0.00
+Throughput      : ~6 400 000 routes/sec
+Allocated bytes : ~0
 ```
 
-## Usage (minimal)
+## Usage
 
 ```csharp
 var graph = new RouterGraphBuilder()
     .WithStartNode(1)
-    .AddEdge(1, 2)
-    .AddEdge(2, 3)
+    .AddEdge(1, 2, weight: 10)
+    .AddEdge(1, 3, weight: 5, conditionId: 1)
+    .AddEdge(2, 4)
+    .AddEdge(3, 4)
     .Build();
 
 Span<int> path = stackalloc int[32];
-if (graph.TryRoute(path, out int length))
-{
-    // path[0..length] contains node indices
-}
+
+// Lowest weight
+graph.TryRoute(path, out int len, BuiltInSelectors.LowestWeight);
+
+// Conditional
+var conditions = new bool[4];
+conditions[1] = true;
+var sel = new ConditionalSelector(conditions);
+graph.TryRoute(path, out len, sel.SelectLowestWeight);
+
+// Fan-out (all paths)
+Span<int> flat = stackalloc int[128];
+graph.TryRouteAll(flat, out int written, out int pathCount);
+```
+
+## HTTP endpoints (Web.API)
+
+```
+GET  /route?strategy=first|lowest|highest
+POST /route/all
 ```
 
 ## Project structure
 
-- `TheRouter.Core` – the allocation-free graph engine
-- `TheRouter.Smoke` – micro-benchmark proving zero allocation + high throughput
-- `Web.API` – placeholder ASP.NET Core host (to be wired later)
+- `TheRouter.Core` – allocation-free graph engine + selectors
+- `TheRouter.Smoke` – micro-benchmark
+- `Web.API` – Minimal API host with sample graph
 
-## Next steps (TODO)
+## Next possible steps
 
-- [ ] Weighted / conditional edge selection strategies
-- [ ] Parallel fan-out / fan-in support
-- [ ] Integration with ASP.NET Core Minimal API
-- [ ] Proper BenchmarkDotNet suite
+- [ ] Dijkstra / shortest-path over the whole DAG
 - [ ] Dynamic graph updates via double-buffering
+- [ ] Proper BenchmarkDotNet suite
+- [ ] Integration tests with WebApplicationFactory
