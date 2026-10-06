@@ -25,6 +25,6 @@ internal sealed class RouteNode
 
     public string? CatchAllName;
 
-    /// <summary>RouteEndpoint that terminates at this node (method-specific endpoints live in a small map).</summary>
-    public Dictionary<string, RouteEndpoint>? RouteEndpoints; // method → endpoint
+    /// <summary>MatchedRoute that terminates at this node (method-specific endpoints live in a small map).</summary>
+    public Dictionary<string, MatchedRoute>? MatchedRoutes; // method → endpoint
 }

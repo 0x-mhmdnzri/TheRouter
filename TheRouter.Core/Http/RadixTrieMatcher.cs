@@ -13,7 +13,7 @@ public sealed class RadixTrieMatcher
     private readonly RouteNode _root = new();
     private bool _frozen;
 
-    public void Map(string method, string template, RouteEndpoint endpoint)
+    public void Map(string method, string template, MatchedRoute endpoint)
     {
         if (_frozen)
             throw new InvalidOperationException("Matcher is frozen; cannot add more routes.");
@@ -64,8 +64,8 @@ public sealed class RadixTrieMatcher
             }
         }
 
-        node.RouteEndpoints ??= new Dictionary<string, RouteEndpoint>(StringComparer.OrdinalIgnoreCase);
-        node.RouteEndpoints[method] = endpoint;
+        node.MatchedRoutes ??= new Dictionary<string, MatchedRoute>(StringComparer.OrdinalIgnoreCase);
+        node.MatchedRoutes[method] = endpoint;
     }
 
     public void Freeze()
@@ -97,7 +97,7 @@ public sealed class RadixTrieMatcher
     public bool TryMatch(
         ReadOnlySpan<char> method,
         ReadOnlySpan<char> path,
-        out RouteEndpoint? endpoint,
+        out MatchedRoute? endpoint,
         Span<(int Start, int Length)> paramRanges,
         out int paramCount)
     {
@@ -175,24 +175,24 @@ public sealed class RadixTrieMatcher
             return false;
         }
 
-        if (node.RouteEndpoints is null)
+        if (node.MatchedRoutes is null)
             return false;
 
-        return TryGetRouteEndpoint(node.RouteEndpoints, method, out endpoint);
+        return TryGetMatchedRoute(node.MatchedRoutes, method, out endpoint);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryMatch(ReadOnlySpan<char> method, ReadOnlySpan<char> path, out RouteEndpoint? endpoint)
+    public bool TryMatch(ReadOnlySpan<char> method, ReadOnlySpan<char> path, out MatchedRoute? endpoint)
     {
         Span<(int, int)> dummy = stackalloc (int, int)[8];
         return TryMatch(method, path, out endpoint, dummy, out _);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool TryGetRouteEndpoint(
-        Dictionary<string, RouteEndpoint> map,
+    private static bool TryGetMatchedRoute(
+        Dictionary<string, MatchedRoute> map,
         ReadOnlySpan<char> method,
-        out RouteEndpoint? endpoint)
+        out MatchedRoute? endpoint)
     {
         if (method.Equals("GET", StringComparison.OrdinalIgnoreCase))
             return map.TryGetValue("GET", out endpoint);

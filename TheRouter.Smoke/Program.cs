@@ -20,7 +20,7 @@ for (int i = 0; i < len; i++) Console.Write(graph.GetNode(path[i]).Id + (i < len
 
 Console.WriteLine("\n=== HTTP Radix matcher (absolute ranges) ===");
 var matcher = new RadixTrieMatcher();
-matcher.Map("GET", "/api/v1/users/{id}/items/{itemId}", new RouteEndpoint
+matcher.Map("GET", "/api/v1/users/{id}/items/{itemId}", new MatchedRoute
 {
     Template = "/api/v1/users/{id}/items/{itemId}",
     Method = "GET",

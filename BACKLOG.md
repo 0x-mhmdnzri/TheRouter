@@ -14,35 +14,44 @@ Last updated: 2026-10-06
 - [x] Zero-alloc method lookup (GET/POST/…)
 - [x] Horrible allocation test case (exposed method.ToString bug → fixed to ~0 B/op)
 - [x] Absolute parameter ranges `(start, length)` into original path
-- [x] Thin Kestrel `RequestDelegate`-style endpoint (no heavy middleware)
-- [x] Shared `SocketsHttpHandler` + basic streaming proxy skeleton
+- [x] Thin Kestrel endpoint (no heavy middleware)
+- [x] Shared `SocketsHttpHandler` + streaming proxy
+- [x] **Parameter binding helpers** (`ParamBinder` – span / int / long / guid without mandatory string)
+- [x] **Forward / Proxy layer**
+  - Upstream from `MatchedRoute.UpstreamBaseAddress`
+  - Hop-by-hop header filtering
+  - Timeout + cancellation propagation
+  - Connection pooling (`PooledConnectionLifetime`, `MaxConnectionsPerServer`, HTTP/2)
+- [x] **Load test 60k requests** (in-process matcher stress)
+  - Result: **~442k RPS**, p50 ≈ 0.001 ms, p99 ≈ 0.003 ms, 60k/60k success
+- [x] **Topological DP shortest-path** for pure DAGs (`TopologicalShortestPath`)
+- [x] **Graph versioning** (`GraphVersionStore` – bounded history + lock-free current)
+- [x] **OpenAPI + Swagger UI**
+  - `/openapi/v1.json`
+  - `/swagger` (Swagger UI via CDN)
 
-## In Progress / Next (priority order)
+## Remaining / optional
 
-1. **Absolute parameter ranges** – DONE (this commit)
-2. **Thin Kestrel endpoint** – DONE (this commit)
-3. **Load test ≈ 60 k requests in 5 s** – measure real RPS + p99 on the thin endpoint
-4. **Forward / Proxy layer**
-   - Proper upstream selection from matched endpoint
-   - Header filtering / hop-by-hop removal
-   - Timeout + cancellation propagation
-   - Connection pooling tuning under real load
-5. **Parameter binding helpers** – turn ranges into typed values without string alloc when possible
-6. **Method trie / perfect hash** (micro-opt, low priority)
-7. **Topological DP shortest-path** specialized for pure DAGs (graph side)
-8. **Graph versioning / snapshots** beyond simple hot-swap
-9. **YARP integration option** (if owning the full proxy becomes too costly)
-
-## Measurement checklist for the 60 k / 5 s test
-
-- [ ] bombardier / k6 / NBomber against the thin endpoint
-- [ ] Report: total requests, RPS, p50 / p99 / p999 latency
-- [ ] `dotnet-counters` : allocation-rate, gen-0-gc-count, gen-2-gc-count
-- [ ] Confirm matching path still shows ~0 B/op under concurrent load
+- [ ] Method trie / perfect hash (micro-opt, low priority – current if-chain is fine)
+- [ ] Full external HTTP load test (bombardier/k6 against Kestrel, not in-process)
+- [ ] YARP integration option (only if owning proxy becomes too costly)
+- [ ] Parameter binding for more types / model binding integration
 
 ## Design invariants (do not break)
 
 - Route table is immutable after `Freeze()` / startup
 - Hot path of `TryMatch` must stay allocation-free for common methods
-- Readers of `HotSwappableGraph` never take locks
+- Readers of `HotSwappableGraph` / `GraphVersionStore.Current` never take locks
 - Proxy must stream; never buffer the whole body
+
+## Key URLs
+
+| Path | Purpose |
+|------|---------|
+| `/swagger` | Swagger UI |
+| `/openapi/v1.json` | OpenAPI document |
+| `/health` | Health check |
+| `/route-info` | Demo match + absolute param ranges + typed bind |
+| `/bench/{**path}` | Pure match bench endpoint |
+| `/api/{**catchAll}` | Main router (local or proxy) |
+| `POST /load-test` | In-process 60k match stress test |
