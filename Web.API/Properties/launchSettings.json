@@ -1,14 +1,14 @@
 {
-  "$schema": "https://json.schemastore.org/launchsettings.json",
   "profiles": {
     "http": {
       "commandName": "Project",
       "dotnetRunMessages": true,
-      "launchBrowser": true,
-      "launchUrl": "todos",
+      "launchBrowser": false,
       "applicationUrl": "http://localhost:5014",
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
+        "ASPNETCORE_ENVIRONMENT": "Production",
+        "DOTNET_gcServer": "1",
+        "DOTNET_GCDynamicAdaptationMode": "1"
       }
     }
   }

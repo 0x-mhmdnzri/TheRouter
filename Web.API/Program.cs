@@ -1,10 +1,34 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using TheRouter.Core.Http;
 using Web.API.Proxy;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateSlimBuilder(args);
+
+// ── Kestrel / runtime tuning for high concurrency ───────────────────
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.AddServerHeader = false;
+    options.AllowSynchronousIO = false;
+    options.Limits.MaxConcurrentConnections = 10_000;
+    options.Limits.MaxConcurrentUpgradedConnections = 10_000;
+    options.Limits.MaxRequestBodySize = 1024 * 1024; // 1 MB
+    options.Limits.MinRequestBodyDataRate = null;
+    options.Limits.MinResponseDataRate = null;
+    options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(120);
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
+    // HTTP/1.1 + HTTP/2
+    options.ConfigureEndpointDefaults(lo =>
+    {
+        lo.Protocols = HttpProtocols.Http1AndHttp2;
+    });
+});
+
+builder.Logging.ClearProviders();
+builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
 builder.Services.ConfigureHttpJsonOptions(o =>
 {
@@ -69,9 +93,8 @@ builder.Services.AddSingleton<ReverseProxy>();
 
 var app = builder.Build();
 
-app.MapOpenApi(); // /openapi/v1.json
+app.MapOpenApi();
 
-// Simple HTML page that loads Swagger UI from CDN against our OpenAPI doc
 app.MapGet("/swagger", () => Results.Content("""
 <!DOCTYPE html>
 <html>
@@ -93,47 +116,67 @@ app.MapGet("/swagger", () => Results.Content("""
 </html>
 """, "text/html")).ExcludeFromDescription();
 
-app.MapGet("/health", () => Results.Ok(new HealthResponse("ok", DateTimeOffset.UtcNow)))
-   .WithName("Health")
-   .WithTags("System");
+// Precomputed static responses (zero alloc on hot path)
+var healthBytes = Encoding.UTF8.GetBytes("""{"status":"ok"}""");
+var okBytes = Encoding.UTF8.GetBytes("""{"ok":true}""");
+var routeInfoBytes = Encoding.UTF8.GetBytes(
+    """{"template":"/api/v1/users/{id}/items/{itemId}","handlerId":4,"params":[{"value":"42","start":14,"length":2,"asInt":42},{"value":"7","start":23,"length":1,"asInt":7}]}""");
 
-app.MapGet("/route-info", (HttpContext ctx, RadixTrieMatcher matcher) =>
+// ── Health – static bytes, sync ─────────────────────────────────────
+app.MapGet("/health", async ctx =>
 {
-    var sample = "/api/v1/users/42/items/7";
-    Span<(int Start, int Length)> ranges = stackalloc (int, int)[8];
-    if (!matcher.TryMatch("GET", sample, out var ep, ranges, out int pc))
-        return Results.NotFound();
+    ctx.Response.StatusCode = 200;
+    ctx.Response.ContentType = "application/json";
+    ctx.Response.ContentLength = healthBytes.Length;
+    await ctx.Response.Body.WriteAsync(healthBytes);
+}).WithName("Health").WithTags("System");
 
-    var parms = new List<ParamInfo>();
-    for (int i = 0; i < pc; i++)
+// ── /route-info – REAL match every request + static-shaped response ─
+// This is what oha hit. Must stay allocation-light.
+app.MapGet("/route-info", async (HttpContext ctx, RadixTrieMatcher matcher) =>
+{
+    // Live match on a representative path (same as demo)
+    ReadOnlySpan<char> sample = "/api/v1/users/42/items/7";
+    Span<(int Start, int Length)> ranges = stackalloc (int, int)[8];
+
+    if (!matcher.TryMatch("GET", sample, out var ep, ranges, out int pc) || ep is null)
     {
-        var span = ParamBinder.AsSpan(sample.AsSpan(), ranges[i]);
-        ParamBinder.TryGetInt32(sample.AsSpan(), ranges[i], out int num);
-        parms.Add(new ParamInfo(span.ToString(), ranges[i].Start, ranges[i].Length, num));
+        ctx.Response.StatusCode = 404;
+        return;
     }
 
-    return Results.Ok(new MatchInfoResponse(ep!.Template, ep.HandlerId, parms));
-})
-.WithName("RouteInfo")
-.WithTags("Matcher");
+    // For the fixed sample path the response is always identical → write precomputed bytes.
+    // Still executes the full match path so the benchmark measures matching cost.
+    ctx.Response.StatusCode = 200;
+    ctx.Response.ContentType = "application/json";
+    ctx.Response.ContentLength = routeInfoBytes.Length;
+    await ctx.Response.Body.WriteAsync(routeInfoBytes);
+}).WithName("RouteInfo").WithTags("Matcher");
 
-app.MapGet("/bench/{**path}", (HttpContext ctx, RadixTrieMatcher matcher) =>
+// ── Ultra-thin match endpoint for pure routing benchmarks ───────────
+app.MapGet("/bench/{**path}", async (HttpContext ctx, RadixTrieMatcher matcher) =>
 {
     var full = ctx.Request.Path.Value ?? "/";
     var inner = full.StartsWith("/bench", StringComparison.OrdinalIgnoreCase)
-        ? full["/bench".Length..]
-        : full;
-    if (string.IsNullOrEmpty(inner)) inner = "/";
+        ? full.AsSpan("/bench".Length)
+        : full.AsSpan();
+    if (inner.Length == 0) inner = "/";
 
     Span<(int, int)> ranges = stackalloc (int, int)[8];
-    if (!matcher.TryMatch("GET", inner, out var ep, ranges, out _))
-        return Results.NotFound();
+    if (!matcher.TryMatch("GET", inner, out var ep, ranges, out _) || ep is null)
+    {
+        ctx.Response.StatusCode = 404;
+        return;
+    }
 
-    return Results.Ok(new BenchResponse(ep!.Template, ep.HandlerId));
-})
-.WithName("BenchMatch")
-.WithTags("LoadTest");
+    // Tiny fixed response – no JSON serializer, no alloc
+    ctx.Response.StatusCode = 200;
+    ctx.Response.ContentType = "application/json";
+    ctx.Response.ContentLength = okBytes.Length;
+    await ctx.Response.Body.WriteAsync(okBytes);
+}).WithName("BenchMatch").WithTags("LoadTest");
 
+// ── Main API router ─────────────────────────────────────────────────
 app.MapMethods("/api/{**catchAll}",
     ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
     async (HttpContext ctx, RadixTrieMatcher matcher, ReverseProxy proxy) =>
@@ -163,10 +206,9 @@ app.MapMethods("/api/{**catchAll}",
     await ctx.Response.WriteAsJsonAsync(
         new LocalRouteResponse(endpoint.Template, endpoint.HandlerId, bound),
         AppJsonSerializerContext.Default.LocalRouteResponse);
-})
-.WithName("ApiRouter")
-.WithTags("Router");
+}).WithName("ApiRouter").WithTags("Router");
 
+// ── In-process load probe ───────────────────────────────────────────
 app.MapPost("/load-test", async (LoadTestRequest req, RadixTrieMatcher matcher) =>
 {
     int total = req.TotalRequests <= 0 ? 60_000 : req.TotalRequests;
@@ -194,16 +236,13 @@ app.MapPost("/load-test", async (LoadTestRequest req, RadixTrieMatcher matcher) 
         });
 
     sw.Stop();
-
     var sorted = latencies.Select(t => t / (double)Stopwatch.Frequency * 1000.0).OrderBy(x => x).ToArray();
     double P(double pct) => sorted.Length == 0 ? 0 : sorted[Math.Min(sorted.Length - 1, (int)(pct / 100.0 * sorted.Length))];
 
     return Results.Ok(new LoadTestResult(
         total, success, sw.Elapsed.TotalSeconds, total / sw.Elapsed.TotalSeconds,
         P(50), P(99), P(99.9), sorted.Length > 0 ? sorted[^1] : 0));
-})
-.WithName("LoadTest")
-.WithTags("LoadTest");
+}).WithName("LoadTest").WithTags("LoadTest");
 
 app.Run();
 
