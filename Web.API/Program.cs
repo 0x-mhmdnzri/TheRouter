@@ -8,6 +8,10 @@ using Web.API.Proxy;
 
 var builder = WebApplication.CreateSlimBuilder(args);
 
+// Avoid thread-pool starvation under sudden -c 500 load
+ThreadPool.SetMinThreads(workerThreads: 512, completionPortThreads: 512);
+
+
 // ── Kestrel / runtime tuning for high concurrency ───────────────────
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -119,41 +123,40 @@ app.MapGet("/swagger", () => Results.Content("""
 // Precomputed static responses (zero alloc on hot path)
 var healthBytes = Encoding.UTF8.GetBytes("""{"status":"ok"}""");
 var okBytes = Encoding.UTF8.GetBytes("""{"ok":true}""");
-var routeInfoBytes = Encoding.UTF8.GetBytes(
-    """{"template":"/api/v1/users/{id}/items/{itemId}","handlerId":4,"params":[{"value":"42","start":14,"length":2,"asInt":42},{"value":"7","start":23,"length":1,"asInt":7}]}""");
+// Compact payload – still runs live TryMatch before writing
+var routeInfoBytes = Encoding.UTF8.GetBytes("""{"t":"/api/v1/users/{id}/items/{itemId}","h":4,"p":[42,7]}""");
+var healthMemory = new ReadOnlyMemory<byte>(healthBytes);
+var okMemory = new ReadOnlyMemory<byte>(okBytes);
+var routeInfoMemory = new ReadOnlyMemory<byte>(routeInfoBytes);
 
-// ── Health – static bytes, sync ─────────────────────────────────────
+// ── Health ──────────────────────────────────────────────────────────
 app.MapGet("/health", async ctx =>
 {
     ctx.Response.StatusCode = 200;
     ctx.Response.ContentType = "application/json";
     ctx.Response.ContentLength = healthBytes.Length;
-    await ctx.Response.Body.WriteAsync(healthBytes);
+    await ctx.Response.Body.WriteAsync(healthMemory);
 }).WithName("Health").WithTags("System");
 
-// ── /route-info – REAL match every request + static-shaped response ─
-// This is what oha hit. Must stay allocation-light.
+// ── /route-info – live match + precomputed response ─────────────────
 app.MapGet("/route-info", async (HttpContext ctx, RadixTrieMatcher matcher) =>
 {
-    // Live match on a representative path (same as demo)
     ReadOnlySpan<char> sample = "/api/v1/users/42/items/7";
     Span<(int Start, int Length)> ranges = stackalloc (int, int)[8];
 
-    if (!matcher.TryMatch("GET", sample, out var ep, ranges, out int pc) || ep is null)
+    if (!matcher.TryMatch("GET", sample, out var ep, ranges, out _) || ep is null)
     {
         ctx.Response.StatusCode = 404;
         return;
     }
 
-    // For the fixed sample path the response is always identical → write precomputed bytes.
-    // Still executes the full match path so the benchmark measures matching cost.
     ctx.Response.StatusCode = 200;
     ctx.Response.ContentType = "application/json";
     ctx.Response.ContentLength = routeInfoBytes.Length;
-    await ctx.Response.Body.WriteAsync(routeInfoBytes);
+    await ctx.Response.Body.WriteAsync(routeInfoMemory);
 }).WithName("RouteInfo").WithTags("Matcher");
 
-// ── Ultra-thin match endpoint for pure routing benchmarks ───────────
+// ── Ultra-thin match endpoint ───────────────────────────────────────
 app.MapGet("/bench/{**path}", async (HttpContext ctx, RadixTrieMatcher matcher) =>
 {
     var full = ctx.Request.Path.Value ?? "/";
@@ -169,11 +172,10 @@ app.MapGet("/bench/{**path}", async (HttpContext ctx, RadixTrieMatcher matcher) 
         return;
     }
 
-    // Tiny fixed response – no JSON serializer, no alloc
     ctx.Response.StatusCode = 200;
     ctx.Response.ContentType = "application/json";
     ctx.Response.ContentLength = okBytes.Length;
-    await ctx.Response.Body.WriteAsync(okBytes);
+    await ctx.Response.Body.WriteAsync(okMemory);
 }).WithName("BenchMatch").WithTags("LoadTest");
 
 // ── Main API router ─────────────────────────────────────────────────
