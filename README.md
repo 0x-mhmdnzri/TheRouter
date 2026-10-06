@@ -24,51 +24,51 @@ dotnet run --project Web.API -c Release --launch-profile http
 oha -c 500 -z 60s --latency-correction --no-tui http://localhost:5014/route-info
 ```
 
-### Measured — warm-up 5s (Windows, `-c 500`)
+### Best sustained run — 60s (`-c 500`)
 
 ```
-oha -c 500 -z 5s --no-tui http://localhost:5014/route-info
+oha -c 500 -z 60s --latency-correction --no-tui http://localhost:5014/route-info
 
 Success rate: 100.00%
-Requests/sec: 102 064
-Average:      4.9 ms
+Requests/sec: 77 157
+Average:      6.5 ms
 Fastest:      0.1 ms
-Slowest:      1.37 s
+Slowest:      1.06 s
 Size/request: 58 B
+Total 200s:   4 631 058
 
 Percentiles:
-  p10  0.6 ms
-  p25  1.0 ms
-  p50  1.9 ms
-  p75  5.9 ms
-  p90  7.0 ms
-  p95  8.8 ms
-  p99  39.4 ms
-  p99.9 267 ms
-  p99.99 1.11 s
-
-Responses: 513 090 × 200
+  p10  2.1 ms
+  p25  5.7 ms
+  p50  6.2 ms
+  p75  7.2 ms
+  p90  8.5 ms
+  p95  10.8 ms
+  p99  16.6 ms
+  p99.9 48 ms
+  p99.99 228 ms
 ```
 
-### Measured — sustained 60s (earlier run, pre–ThreadPool bump)
+### Warm-up 5s peak (same endpoint)
 
 ```
-Requests/sec: 55 825
-Average:      8.95 ms
-p50 5.45 ms | p99 30.8 ms
+Requests/sec: ~102 000
+Average:      ~4.9 ms
+p50:          ~1.9 ms
 ```
 
 Progression:
 
-| Stage | RPS | Average | Notes |
-|-------|-----|---------|--------|
-| Before Kestrel/logging opts | ~16.7k | ~30 ms | List + JsonSerializer on hot path |
-| After slim + static bytes | ~55.8k | ~9 ms | Live `TryMatch` + precomputed body |
-| After ThreadPool + compact JSON | **~102k** | **~4.9 ms** | 5s warm-up run, 58 B/response |
+| Stage | RPS | Average | p99 | Notes |
+|-------|-----|---------|-----|--------|
+| Initial (JsonSerializer + List) | ~16.7k | ~30 ms | ~71 ms | allocations on hot path |
+| Slim + static bytes | ~55.8k | ~9 ms | ~31 ms | precomputed body |
+| ThreadPool + compact JSON | ~102k (5s) | ~4.9 ms | ~39 ms | peak warm-up |
+| Sustained 60s (HTTP/1+2, closure) | **~77k** | **~6.5 ms** | **~17 ms** | production-like |
 
 In-process matcher alone (no HTTP): **~400k+ matches/sec**, ~0 B/op.
 
-Remaining tail (p99.9+) is mostly connection setup / scheduling under `-c 500`, not match cost (see DNS+dialup ~300 ms in details).
+Tail beyond p99 is dominated by connection setup / OS scheduling (DNS+dialup avg ~300 ms on new connections), not `TryMatch`.
 
 ## How to push further
 
